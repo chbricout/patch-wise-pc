@@ -1,0 +1,28 @@
+# [build-system]
+# requires = ["setuptools>=61.0", "wheel"]
+# build-backend = "setuptools.build_meta"
+
+[project]
+name = "pconv"
+version = "0.1.0"
+description = "convolution like PCs"
+authors = [{ name = "Charles Bricout", email = "bricout.charles@outlook.com" }]
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "torch==2.9.0",
+    "torchvision==0.24.0",
+    "pytorch-lightning==2.5.6",
+    "torchmetrics==1.8.2",
+    "scikit-learn==1.7.2",
+    "numpy==2.2.6",
+    "matplotlib==3.10.7",
+    "python-dotenv==1.2.1",
+    "click==8.3.1",
+    "libcirkit==0.2.1",
+    "comet_ml==3.54.0",
+    "simple_slurm==0.3.6",
+    "lightning==2.5.6",
+    "lightning-utilities==0.15.2",
+    "ray==2.51.1",
+]
