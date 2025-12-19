@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'clusters/docker/**'
-
+      - 'pyproject.toml'
 jobs:
   docker:
     runs-on: ubuntu-latest
@@ -25,6 +25,6 @@ jobs:
         name: Build and push
         uses: docker/build-push-action@v5
         with:
-          context: "{{defaultContext}}:clusters/docker"
+          context: "."
           push: true
           tags: dimmestp/multi_node_pytorch:latest
