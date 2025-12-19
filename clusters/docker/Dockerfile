@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/rapidsai/base:25.12a-cuda12-py3.11
+FROM rapidsai/base:25.12a-cuda12-py3.11
 
 # Set the working directory
 WORKDIR /app
