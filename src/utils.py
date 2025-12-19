@@ -11,6 +11,7 @@ import yaml
 from cirkit.templates import data_modalities, utils
 from lightning import Callback
 from pytorch_lightning.loggers import CometLogger, CSVLogger
+from ray import tune
 from torch.utils.flop_counter import FlopCounterMode
 from torchvision.utils import save_image
 
@@ -18,7 +19,7 @@ from src.orchestrator import get_config_key
 
 
 def patch_circuit_factory(
-    kernel_size, channel, region_graph, layer_type, num_units, **kwargs
+    kernel_size, channel, region_graph, layer_type, num_units, num_classes=1, **kwargs
 ):
     return data_modalities.image_data(
         (channel, *kernel_size),
@@ -27,10 +28,16 @@ def patch_circuit_factory(
         num_input_units=num_units,
         sum_product_layer=layer_type,
         num_sum_units=num_units,
-        sum_weight_param=utils.Parameterization(
-            activation="softmax", initialization="normal"
-        ),
+        num_classes=num_classes,
+        sum_weight_param=get_parameterization(**kwargs),
     )
+
+
+def get_parameterization(use_pic: bool = False, **kwargs):
+    if use_pic:
+        return utils.Parameterization(initialization="normal")
+    else:
+        return utils.Parameterization(activation="softmax", initialization="normal")
 
 
 def circuit_factory(circuit_type: str, *, image_size=None, kernel_size=None, **kwargs):
@@ -77,10 +84,55 @@ def patchify(kernel_size, stride, compile=True, contiguous_output=False):
     return _patchify
 
 
-# def unpatchify(kernel_size, compile=True):
-#     kh, kw = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
-#     def _unpatchify(image:torch.Tensor):
-#         # (B*Kh*Kw) -> (B)
+def unpatchify(
+    image_size: tuple[int, int],
+    kernel_size: tuple[int, int],
+    stride: tuple[int, int],
+    channel: int,
+):
+    H, W = image_size
+    kh, kw = kernel_size
+    sh, sw = stride
+
+    def _unpatchify(patches: torch.Tensor):
+        """
+        patches: (N_patches_total, C*kh*kw) or (N_patches_total, C, kh, kw)
+        image_size: (H, W)
+        kernel_size: (kh, kw)
+        stride: (sh, sw)
+        channel: number of channels C
+        Returns: (N_images, C, H, W) tensor (float)
+        """
+        if patches.dim() == 2:
+            # flatten -> (N, C, kh, kw)
+            patches = patches.view(-1, channel, kh, kw)
+
+        Bpatch = patches.shape[0]
+
+        Lh = (H - kh) // sh + 1
+        Lw = (W - kw) // sw + 1
+        patches_per_image = Lh * Lw
+        assert Bpatch % patches_per_image == 0, (
+            "Total patches not divisible by patches_per_image"
+        )
+
+        n_images = Bpatch // patches_per_image
+        patches = patches.view(n_images, patches_per_image, channel, kh, kw)
+
+        images = torch.zeros(
+            (n_images, channel, H, W), dtype=patches.dtype, device=patches.device
+        )
+
+        idx = 0
+        for ih in range(Lh):
+            for iw in range(Lw):
+                patch_idx = ih * Lw + iw
+                h0 = ih * sh
+                w0 = iw * sw
+                images[:, :, h0 : h0 + kh, w0 : w0 + kw] = patches[:, patch_idx]
+        return images
+
+    return _unpatchify
 
 
 def new_experiment(key: str):
@@ -248,6 +300,7 @@ class GreenCallback(Callback):
                 "max_train_memory": torch.cuda.memory.max_memory_allocated(
                     pl_module.device
                 )
+                / 1e9
             }
         )
 
@@ -285,3 +338,19 @@ class GreenCallback(Callback):
                 / 1e9,
             }
         )
+
+
+class GreenCallbackRay(Callback):
+    def on_train_end(self, trainer, pl_module):
+        tune.report(
+            {
+                "number_parameters": sum(
+                    p.numel() for p in pl_module.circuit.parameters() if p.requires_grad
+                ),
+                "val_loss": sum(pl_module.running_loss) / len(pl_module.running_loss),
+            },
+        )
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        val_loss = sum(pl_module.running_loss) / len(pl_module.running_loss)
+        pl_module.log("val_bpd", pl_module.get_bpd(val_loss))

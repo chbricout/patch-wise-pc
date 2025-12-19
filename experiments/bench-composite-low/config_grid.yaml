@@ -1,0 +1,25 @@
+circuit_type:
+  - composite
+patch_ckpt:
+  - ./checkpoints/best_celeba_8x8.ckpt
+  - ./checkpoints/best_imagenet_8x8.ckpt
+  - ./checkpoints/best_celeba_8x8_colour.ckpt
+  - ./checkpoints/best_imagenet_8x8_colour.ckpt
+layer_type:
+  - cp-t
+  - cp
+region_graph:
+  - quad-graph
+  - quad-tree-2
+num_units:
+  - 16
+  - 32
+  - 64
+lr:
+  - 0.05
+  - 0.01
+should_freeze:
+  - True
+  - False
+batch_size:
+  - 32

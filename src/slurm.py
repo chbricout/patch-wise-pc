@@ -3,16 +3,17 @@ from simple_slurm import Slurm
 
 def get_gpu_job_slurm(name) -> Slurm:
     exclude_flag = ""
-    for i in range(7, 12):
+    for i in range(7, 13):
         exclude_flag += f"damnii{str(i).zfill(2)},"
+
     exclude_flag = exclude_flag[:-1]
     job = Slurm(
         job_name=name,
         cpus_per_task=4,
-        mem="30G",
+        mem="128G",
         partition="PGR-Standard",
         gres="gpu:1",
-        time="3:00:00",
+        time="24:00:00",
         output=f"./logs/{name}.out",
         exclude=exclude_flag,
     )
@@ -22,6 +23,7 @@ def get_gpu_job_slurm(name) -> Slurm:
     job.add_cmd("nvidia-smi")
     job.add_cmd("cd  /home/s2893001/projects/pconv")
     job.add_cmd("conda activate ./.conda")
+    job.add_cmd('echo "ready to start job"')
     return job
 
 

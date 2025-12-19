@@ -1,0 +1,40 @@
+circuit_type:
+  - patch
+layer_type:
+  - cp-t
+  - cp
+region_graph:
+  - quad-graph
+  - quad-tree-2
+num_units:
+  - 128
+  - 256
+  - 512
+  - 1024
+lr:
+  - 0.005
+dataset:
+  - imagenet
+  - celeba
+kernel_size:
+  - [2,2]
+  - [4,4]
+  - [8,8]
+  - [16,16]
+  - [32,32]
+  - [64,64]
+colour_transform:
+  - ycc_lossless
+use_pic:
+  - True
+batch_size:
+  - 32
+early_stopping_delta:
+  - 30
+weight_decay:
+  - 1e-2
+scheduler:
+  - name: cosine_annealing
+    T_0: 500
+    T_mult: 1
+    eta_min: 1e-4

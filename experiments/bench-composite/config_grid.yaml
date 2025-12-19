@@ -1,0 +1,25 @@
+circuit_type:
+  - composite
+patch_ckpt:
+  - ./checkpoints/best_mnist.ckpt
+  - ./checkpoints/best_cifar.ckpt
+  - ./checkpoints/best_cifar_4x4_colour.ckpt
+layer_type:
+  - cp-t
+  - cp
+region_graph:
+  - quad-graph
+  - quad-tree-2
+num_units:
+  - 128
+  - 256
+  - 512
+  - 1024
+lr:
+  - 0.05
+  - 0.01
+should_freeze:
+  - True
+  - False
+batch_size:
+  - 32

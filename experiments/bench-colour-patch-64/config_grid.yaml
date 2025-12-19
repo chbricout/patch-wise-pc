@@ -1,6 +1,5 @@
 circuit_type:
   - patch
-  - base
 layer_type:
   - cp-t
   - cp
@@ -14,11 +13,19 @@ num_units:
   - 1024
 lr:
   - 0.05
-  - 0.01
 dataset:
-  - mnist
-  - cifar
+  - celeba
+  - imagenet
 kernel_size:
+  - [2,2]
   - [4,4]
+  - [8,8]
+  - [16,16]
+  - [32,32]
+  - [64,64]
+colour_transform:
+  - ycc_lossless
 batch_size:
-  - 128
+  - 32
+early_stopping_delta:
+  - 30

@@ -8,15 +8,13 @@ import click
 import yaml
 
 
-
-
 def check_statuses(path_to_exp):
     hp = load_experiment(path_to_exp)
     num_exp = len(hp)
     running = 0
     correct_run = 0
     failed_run = 0
-    failed_dict=[]
+    failed_dict = []
     for summary in glob.glob(
         os.path.join(path_to_exp, "runs", "*", "version_*", "summary.yaml")
     ):
@@ -27,10 +25,10 @@ def check_statuses(path_to_exp):
                 running += 1
             elif summary_file["status"] == "FAILED":
                 failed_run += 1
-                failure=                    {
-                        "path":summary,
-                    }
-                
+                failure = {
+                    "path": summary,
+                }
+
                 if "exception" in summary_file:
                     failure["exception"] = summary_file["exception"]
                 else:
@@ -38,13 +36,15 @@ def check_statuses(path_to_exp):
                 failed_dict.append(failure)
             elif summary_file["status"] == "SUCCESS":
                 correct_run += 1
-    total =correct_run + running + failed_run
+    total = correct_run + running + failed_run
     click.echo(
-        click.style(f"Succeed: {correct_run}", fg="green")+ ", " + click.style(f"Running: {running}", fg="cyan") + ", "+click.style(f" Failed: {failed_run}", fg="red")
+        click.style(f"Succeed: {correct_run}", fg="green")
+        + ", "
+        + click.style(f"Running: {running}", fg="cyan")
+        + ", "
+        + click.style(f" Failed: {failed_run}", fg="red")
     )
-    click.secho(
-        f"Status: {total} / {num_exp} ({total/num_exp *100}%)", bold=True
-        )
+    click.secho(f"Status: {total} / {num_exp} ({total / num_exp * 100}%)", bold=True)
 
     click.echo("==== Failed Experiments ====\n")
     for exp in failed_dict:
@@ -76,7 +76,7 @@ def investigate_running(path_to_exp):
                 recently_modified = age_sec < 120
                 if not recently_modified:
                     click.echo(summary)
-                    to_rerun.append(summary["command"])
+                    to_rerun.append(summary_file["command"])
     return to_rerun
 
 
@@ -89,16 +89,20 @@ def compress_exp(path_to_exp):
     shutil.make_archive(output, "zip", path_to_exp)
 
 
-def get_config_key(circuit_type: str,kernel_size:list[int], *, image_size=None,  **kwargs):
+def get_config_key(
+    circuit_type: str, kernel_size: list[int] = [], *, image_size=None, **kwargs
+):
     name = f"{circuit_type}"
     for key, item in kwargs.items():
         if key == "experiment_path":
             continue
-        
+        if key == "patch_ckpt":
+            item = item.split("/")[-1].removesuffix(".ckpt")
         name += f"+{item}"
 
-    item="x".join(str(i) for i in kernel_size)
-    name += f"+{item}"
+    if kernel_size is not None:
+        item = "x".join(str(i) for i in kernel_size)
+        name += f"+{item}"
     return name
 
 
