@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+ generateName: template-workflow-job-
+ labels:
+  kueue.x-k8s.io/queue-name: <USER_KUEUE_NAME>spec:
+ completions: 1
+ parallelism: 1
+ template:
+  spec:
+   restartPolicy: Never
+   containers:
+   - name: template-docker-image
+     image: <dockerhub-user>/template-docker-image:latest
+     command: ['sh', '-c', "python3 /code/<python-script>"]
+     resources:
+      requests:
+       cpu: 10
+       memory: "40Gi"
+      limits:
+       cpu: 10
+       memory: "80Gi"
+       nvidia.com/gpu: 1
+     volumeMounts:
+     - mountPath: /mnt/ceph_rbd
+       name: volume
+     - mountPath: /code
+       name: github-code
+   initContainers:
+   - name: lightweight-git-container
+     image: cicirello/alpine-plus-plus
+     command: ['sh', '-c', "cd /code; git clone <target-repo>"]
+     resources:
+      requests:
+       cpu: 1
+       memory: "4Gi"
+      limits:
+       cpu: 1
+       memory: "8Gi"
+     volumeMounts:
+     - mountPath: /code 
+       name: github-code
+   volumes:
+   - name: volume
+     persistentVolumeClaim:
+      claimName: benchmark-imagenet-pvc
+   - name: github-code
+     emptyDir:
+      sizeLimit: 1Gi
