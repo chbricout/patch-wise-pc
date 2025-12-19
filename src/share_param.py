@@ -1,113 +1,296 @@
+from typing import Any
 from copy import copy
-
-from cirkit.symbolic.circuit import Circuit
-from cirkit.symbolic.layers import InputLayer, SumLayer
-from cirkit.symbolic.parameters import (
-    Parameter,
-    ReferenceParameter,
-    TensorParameter,
+import psutil
+import torch
+from cirkit.backend.torch.circuits import TorchCircuit
+from cirkit.backend.torch.layers.inner import TorchSumLayer
+from cirkit.backend.torch.layers.input import TorchInputLayer
+from cirkit.backend.torch.layers.optimized import TorchCPTLayer
+from cirkit.backend.torch.parameters.nodes import (
+    TorchParameterInput,
+    TorchTensorParameter,
+    TorchUnaryParameterOp,
 )
+from cirkit.backend.torch.parameters.parameter import TorchParameter
+from cirkit.symbolic.circuit import Circuit
+from cirkit.templates import data_modalities
 from cirkit.utils.scope import Scope
+from cirkit.pipeline import compile as cirkit_compile
+
+from src.utils import patchify, patch_circuit_factory
 
 
-def copy_parameter(graph: Parameter):
+def get_share_circ(conf):
+    conf_copy = copy(conf)
+    top_conf = copy(conf)
+    n_patch = tuple(
+        i // j for i, j in zip(conf_copy["image_size"], conf_copy["kernel_size"])
+    )
+    top_conf["kernel_size"] = n_patch
+    top_conf["channel"] = 1
+    conf_copy["num_classes"] = conf_copy["num_units"]
+    patch_symb = patch_circuit_factory(**conf_copy)
+    patch_circ = cirkit_compile(patch_symb)
+    composite_symb = stitch_circuits(
+        top_circuit_param=top_conf, patch_circuit_param=conf_copy
+    )
+    composite_compiled = cirkit_compile(composite_symb)
+    share_param_like(
+        composite_compiled,
+        patch_circ,
+        should_init_mean=False,
+        should_freeze=False,
+    )
+
+    return composite_compiled
+
+
+def get_composite_circ(top_circuit_config: dict[str, Any], patch_circuit_module):
+    # print(f"Memory Status Beginning {psutil.virtual_memory()}", flush=True)
+    top_circ_param = copy(top_circuit_config)
+    patch_circuit_config = patch_circuit_module.config
+    n_patch = tuple(
+        i // j
+        for i, j in zip(
+            patch_circuit_config["image_size"], patch_circuit_config["kernel_size"]
+        )
+    )
+    top_circ_param["kernel_size"] = n_patch
+    top_circ_param["channel"] = 1
+    patch_circuit_config["num_classes"] = top_circ_param["num_units"]
+    # print(f"Memory Status before stitch {psutil.virtual_memory()}", flush=True)
+    composite_symb = stitch_circuits(
+        top_circuit_param=top_circ_param, patch_circuit_param=patch_circuit_config
+    )
+    # print(f"Memory Status after stitch {psutil.virtual_memory()}", flush=True)
+
+    composite_compiled = cirkit_compile(composite_symb)
+    # print(f"Memory Status after compile {psutil.virtual_memory()}", flush=True)
+
+    share_param_like(
+        composite_compiled,
+        patch_circuit_module.circuit,
+        should_init_mean=top_circuit_config.get("should_init_mean", False),
+        should_freeze=top_circuit_config.get("should_freeze", False),
+    )
+    # print(f"Memory Status after share {psutil.virtual_memory()}", flush=True)
+
+    assert test_parameter_sharing(
+        composite_compiled,
+        patch_circuit_module.circuit,
+        (patch_circuit_config["channel"], *patch_circuit_config["image_size"]),
+        patch_circuit_config["kernel_size"],
+    ), "Parameter sharing failed, likelihood is not equal"
+    print(f"Memory Status after test {psutil.virtual_memory()}", flush=True)
+
+    return composite_compiled
+
+
+def stitch_circuits(top_circuit_param, patch_circuit_param):
+    im_shape = top_circuit_param["image_size"]
+    kernel_shape = patch_circuit_param["kernel_size"]
+
+    index_pixel = torch.arange(
+        im_shape[0] * im_shape[1] * patch_circuit_param["channel"]
+    ).reshape(1, patch_circuit_param["channel"], *im_shape)
+    patch_fn = patchify(kernel_shape, kernel_shape)
+    scope_order = patch_fn(index_pixel).reshape(
+        -1, kernel_shape[0] * kernel_shape[1] * patch_circuit_param["channel"]
+    )
+    top = patch_circuit_factory(**top_circuit_param)
+    new_layers = top._nodes.copy()
+    new_inputs = top._in_nodes.copy()
+    for new_scope, input_node in zip(
+        scope_order, list(top.layerwise_topological_ordering())[0]
+    ):
+        # Remove input node
+        new_layers.remove(input_node)
+        # add output of patch (create patch)
+        patch = patch_circuit_factory(**patch_circuit_param)
+        patch_input = list(patch.layerwise_topological_ordering())[0]
+        for idx, inp in enumerate(patch_input):
+            inp.scope = Scope([new_scope[list(inp.scope)[0]].item()])
+        new_layers.extend(patch._nodes)
+
+        # verify connections
+        for node, inputs in top._in_nodes.items():
+            if input_node in inputs:
+                new_inputs[node].remove(input_node)
+                new_inputs[node].extend(patch.outputs)
+        new_inputs.update(patch._in_nodes)
+
+    return Circuit(new_layers, new_inputs, top.outputs)
+
+
+def copy_parameter(graph: TorchParameter, new_shape):
     new_param_nodes = []
     copy_map = {}
     in_nodes = {}
     outputs = []
     for n in graph.topological_ordering():
         instance = type(n)
-        if instance == TensorParameter:
-            new_param = ReferenceParameter(n)
-        else:
-            new_param = instance(**n.config)
+        config = n.config
+        if isinstance(n, TorchTensorParameter):
+            del config["shape"]
+            new_param = instance(*new_shape, **config)
+            new_param._ptensor = torch.nn.Parameter(
+                torch.zeros((graph.shape[0], *new_shape))
+            )
+
+        elif isinstance(n, TorchUnaryParameterOp):
+            config["in_shape"] = new_shape
+
+            new_param = instance(**config)
         new_param_nodes.append(new_param)
         copy_map[n] = new_param
         inputs = [copy_map[in_node] for in_node in graph.node_inputs(n)]
         if len(inputs) > 0:
             in_nodes[new_param] = inputs
     outputs = [copy_map[out_node] for out_node in graph.outputs]
-    return Parameter(nodes=new_param_nodes, in_nodes=in_nodes, outputs=outputs)
+    parameter = TorchParameter(
+        modules=new_param_nodes, in_modules=in_nodes, outputs=outputs
+    )
+    return parameter
 
 
-def copy_circuit(graph: Circuit, scope_map: dict[int, int], root_node_outputs=None):
-    new_circ_layers = []
-    copy_map = {}
-    in_nodes = {}
-    outputs = []
-    copied_params = []
-    for layer in graph.topological_ordering():
-        instance = type(layer)
-        if isinstance(layer, SumLayer):
-            if layer.weight in copied_params:
-                parameter = copy_parameter(layer.weight)
+class TorchSharedParameter(TorchParameterInput):
+    def __init__(
+        self,
+        in_shape: tuple[int, ...],
+        parameter: list[torch.nn.Module],
+        num_folds: int,
+    ):
+        super().__init__()
+        self._num_folds = num_folds
+        self.in_shape = in_shape
+        self.internal_param = parameter
+
+    def forward(self):
+        current_input = None
+        for param in self.internal_param:
+            if current_input is None:
+                current_input = param()
             else:
-                parameter = layer.weight
-                copied_params.append(layer.weight)
-            new_config = layer.config
-            new_layer = SumLayer(**new_config, weight=parameter)
-        if isinstance(layer, InputLayer):
-            params = list(layer.params.items())
-            p_key = params[0][0]
-            p_graph = params[0][1]
-            new_scope = Scope([scope_map[s] for s in layer.scope])
-            config = copy(layer.config)
-            del config["scope"]
-            if p_graph in copied_params:
-                new_p_graph = copy_parameter(p_graph)
-            else:
-                new_p_graph = p_graph
-                copied_params.append(p_graph)
-            new_layer = instance(scope=new_scope, **config, **{p_key: new_p_graph})
-        else:
-            new_config = layer.config
-            new_layer = instance(**new_config, **layer.params)
-        new_circ_layers.append(new_layer)
-        copy_map[layer] = new_layer
-        inputs = [copy_map[in_node] for in_node in graph.node_inputs(layer)]
-        if len(inputs) > 0:
-            in_nodes[new_layer] = inputs
-    outputs = [copy_map[out_node] for out_node in graph.outputs]
-    if root_node_outputs is not None:
-        for n in outputs:
-            n.num_output_units = root_node_outputs
-    return new_circ_layers, in_nodes, outputs
+                current_input = param(current_input)
+        share_fold, *inner_units = current_input.shape
+        expanded = current_input.expand(
+            self.num_folds // share_fold, share_fold, *inner_units
+        ).reshape(self.num_folds, *inner_units)
+
+        return expanded
+
+    @property
+    def shape(self):
+        return self.in_shape
 
 
-def share_scope(big_circ: Circuit, share_small: Circuit, scope_size: int):
-    layers = copy(big_circ.nodes)
-    in_layers = copy(big_circ.nodes_inputs)
-    layers_to_replace = []
-    for n in big_circ.layerwise_topological_ordering():
-        if len(big_circ.layer_scope(n[0])) == scope_size and isinstance(n[0], SumLayer):
-            layers_to_replace = n
-            break
+def share_param_like(
+    base_circ: TorchCircuit,
+    share_struct: TorchCircuit,
+    should_init_mean=False,
+    should_freeze=False,
+):
+    for idx, layer in enumerate(share_struct.layers):
+        if isinstance(layer, TorchInputLayer):
+            folds = base_circ.layers[idx].probs.num_folds
+            shared_param = TorchSharedParameter(
+                base_circ.layers[idx].probs.shape,
+                parameter=layer.probs.nodes,
+                num_folds=folds,
+            )
+            base_circ.layers[idx].probs = shared_param
+        elif isinstance(layer, TorchCPTLayer) or isinstance(layer, TorchSumLayer):
+            internal_param = layer.weight.nodes
+            has_new_nodes = False
+            if layer.num_output_units != base_circ.layers[idx].num_output_units:
+                new_parameter = copy_parameter(
+                    layer.weight, base_circ.layers[idx].weight.nodes[0].shape
+                )
+                _, o, i = internal_param[0]._ptensor.data.shape
+                _, goal_o, goal_i = new_parameter.nodes[0]._ptensor.data.shape
+                num_input = goal_i // i
+                num_output = goal_o // o
+                new_parameter.nodes[0]._ptensor.data = (
+                    internal_param[0]
+                    ._ptensor.data.clone()
+                    .repeat((1, num_output, num_input))
+                )
+                has_new_nodes = True
 
-    entry_points_map = {}
-    for l in layers_to_replace:
-        for sl in big_circ.subgraph(l).topological_ordering():
-            to_remove = [sl]
-            while len(to_remove) > 0:
-                tr = to_remove.pop()
-                if tr in in_layers:
-                    to_remove.extend(in_layers[tr])
-                    del in_layers[tr]
-                if tr in layers:
-                    layers.remove(tr)
+                internal_param = new_parameter.nodes
+            folds = base_circ.layers[idx].weight.num_folds
+            shared_param = TorchSharedParameter(
+                base_circ.layers[idx].weight.shape,
+                parameter=internal_param,
+                num_folds=folds,
+            )
+            if should_freeze and not has_new_nodes:
+                freeze_parameter(shared_param)
+            base_circ.layers[idx].weight = shared_param
+    if should_init_mean:
+        init_mean(base_circ, len(share_struct.layers))
 
-        scope_map = dict(zip(share_small.scope, big_circ.layer_scope(l)))
-        new_subgraph_layers, new_subgraph_inputs, new_output = copy_circuit(
-            share_small, scope_map, root_node_outputs=sl.num_output_units
+
+def init_mean(circ, start_idx):
+    for layer in circ.layers[start_idx:]:
+        print(layer)
+        if isinstance(layer, TorchCPTLayer) or isinstance(layer, TorchSumLayer):
+            param = layer.weight
+            tensor = param.nodes[0]._ptensor
+            inputs = tensor.shape[-1]
+
+            param.nodes[0]._ptensor.data = torch.full(
+                tensor.shape, torch.exp(torch.tensor(1 / inputs))
+            )
+
+
+def freeze_parameter(param: TorchSharedParameter):
+    for p in param.parameters():
+        p.requires_grad = False
+
+
+def test_parameter_sharing(
+    composite_circ,
+    patch_circ,
+    image_size: tuple[int, int, int],
+    kernel_size: tuple[int, int],
+):
+    print(f"test patches", flush=True)
+    comp_param = sum(p.numel() for p in composite_circ.parameters() if p.requires_grad)
+    patch_param = sum(p.numel() for p in patch_circ.parameters() if p.requires_grad)
+    print(
+        f"Composite circ params: {comp_param}, patch circ params: {patch_param}",
+        flush=True,
+    )
+    with torch.no_grad():
+        random_data = torch.randint(256, (1, *image_size), dtype=torch.int32).cuda()
+
+        composite_circ = composite_circ.cuda()
+        comp_ll = composite_circ(
+            random_data.reshape(-1, image_size[0] * image_size[1] * image_size[2])
+        ).item()
+        composite_circ = composite_circ.cpu()
+
+        torch.cuda.empty_cache()
+
+        patch_fn = patchify(kernel_size, kernel_size)
+        patched = patch_fn(random_data)
+        patch_circ = patch_circ.cuda()
+        patch_ll = (
+            patch_circ(
+                patched.reshape(-1, image_size[0] * kernel_size[0] * kernel_size[1])
+            )
+            .sum()
+            .item()
         )
-        layers.extend(new_subgraph_layers)
-        in_layers.update(new_subgraph_inputs)
+        patch_circ = patch_circ.cpu()
 
-        entry_points_map[sl] = new_output
+        del patched
+        del patch_circ
+        del random_data
+        torch.cuda.empty_cache()
 
-    for old, new in entry_points_map.items():
-        for node, inputs in in_layers.items():
-            if old in inputs:
-                in_layers[node].remove(old)
-                in_layers[node].extend(new)
+    print(f"Patch log likelihood: {patch_ll}")
+    print(f"Composite log likelihood: {comp_ll}")
 
-    return Circuit(layers=layers, in_layers=in_layers, outputs=big_circ.outputs)
+    return abs(patch_ll - comp_ll) < 0.01

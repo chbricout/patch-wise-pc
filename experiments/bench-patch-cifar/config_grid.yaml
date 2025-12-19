@@ -1,6 +1,5 @@
 circuit_type:
   - patch
-  - base
 layer_type:
   - cp-t
   - cp
@@ -16,9 +15,12 @@ lr:
   - 0.05
   - 0.01
 dataset:
-  - mnist
   - cifar
 kernel_size:
+  - [2,2]
   - [4,4]
+  - [8,8]
+  - [16,16]
+  - [32,32]
 batch_size:
   - 128
