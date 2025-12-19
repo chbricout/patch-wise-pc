@@ -30,4 +30,4 @@ jobs:
           context: "."
           file: clusters/docker/Dockerfile 
           push: true
-          tags: dimmestp/multi_node_pytorch:latest
+          tags: patch-wise-pc/python-env:latest
