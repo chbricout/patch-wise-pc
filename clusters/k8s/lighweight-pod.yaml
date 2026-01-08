@@ -2,25 +2,31 @@
 apiVersion: v1
 kind: Pod
 metadata:
- generateName: lightweight-pod-
- labels:
-  kueue.x-k8s.io/queue-name: <USER_KUEUE_NAME>
+  generateName: s2893001-lightweight-pod-
+  labels:
+    kueue.x-k8s.io/queue-name: eidf029ns-user-queue
+    eidf/user: s2893001-infk8s
 spec:
- containers:
- - name: data-loader
-   image: ubuntu-latest
-   command: ["sleep", "infinity"]
-   resources:
-    requests:
-     cpu: 1
-     memory: "1Gi"
-    limits:
-     cpu: 1
-     memory: "1Gi"
-   volumeMounts:
-   - mountPath: /mnt/ceph_rbd
-     name: volume
- volumes:
- - name: volume
-   persistentVolumeClaim:
-    claimName: template-workflow-pvc
+  containers:
+    - name: data-loader
+      image: chbricout/patch-wise-pc:latest
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: 1
+          memory: "10Gi"
+        limits:
+          cpu: 1
+          memory: "10Gi"
+      volumeMounts:
+        - mountPath: /datasets
+          name: volume
+        - mountPath: /experiments
+          name: output
+  volumes:
+    - name: volume
+      persistentVolumeClaim:
+        claimName: s2893001-computer-vision-dataset
+    - name: output
+      persistentVolumeClaim:
+        claimName: s2893001-patch-wise-output

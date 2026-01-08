@@ -6,8 +6,9 @@ metadata:
     kueue.x-k8s.io/queue-name: eidf029ns-user-queue
     eidf/user: s2893001-infk8s
 spec:
-  completions: 1
-  parallelism: 1
+  parallelism: 10 # Only 4 GPUs used at once
+  completions: $TOTAL_EXP # Total 100 experiments
+  completionMode: Indexed # This enables the JOB_COMPLETION_INDEX
   template:
     spec:
       restartPolicy: Never
@@ -19,13 +20,9 @@ spec:
             - -c
             - >
               cd /code/patch-wise-pc;
+              mkdir experiments/$EXP;
               ls -l -a -h datasets;
-              export OMP_NUM_THREADS=4;
-              python3 cli.py  run-exp 
-              --config '{"circuit_type": "patch", "layer_type": "cp", "region_graph": "quad-graph",
-              "num_units": 512, "lr": 0.05, "dataset": "imagenet", "kernel_size": [2, 2],
-              "colour_transform": "ycc_lossless", "batch_size": 32, "early_stopping_delta":30,
-              "experiment_path": "experiments/bench-colour-patch-64/"}'
+              python3 cli.py  run-exp-kube
           resources:
             requests:
               cpu: 4
@@ -39,6 +36,8 @@ spec:
               name: github-code
             - mountPath: /code/patch-wise-pc/datasets
               name: dataset
+            - mountPath: /code/patch-wise-pc/experiments
+              name: output
       initContainers:
         - name: lightweight-git-container
           image: cicirello/alpine-plus-plus
@@ -48,6 +47,7 @@ spec:
             - >
               cd /code;
               git clone https://github.com/chbricout/patch-wise-pc.git;
+              mv experiments fixed_experiments;
               chown -R 1001:1001 /code/patch-wise-pc
           resources:
             requests:
@@ -63,6 +63,9 @@ spec:
         - name: dataset
           persistentVolumeClaim:
             claimName: s2893001-computer-vision-dataset
+        - name: output
+          persistentVolumeClaim:
+            claimName: s2893001-patch-wise-output
         - name: github-code
           emptyDir:
             sizeLimit: 20Gi

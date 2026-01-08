@@ -26,9 +26,15 @@ def cli():
     type=bool,
     is_flag=True,
 )
+@click.option(
+    "-K",
+    "--kubernetes",
+    type=bool,
+    is_flag=True,
+)
 @click.option("-e", "--experiment", type=str, required=True)
 @click.option("-g", "--gpus", type=int, default=None)
-def start_experiment(slurm, experiment, gpus):
+def start_experiment(slurm, kubernetes, experiment, gpus):
     from src.orchestrator import get_config_key, load_experiment
 
     explore_list = load_experiment(experiment)
@@ -57,6 +63,7 @@ def start_experiment(slurm, experiment, gpus):
             for key, value in metrics.items():
                 click.echo(f"   {key}: {value:.4f}")
             click.echo("-" * 40)
+
     else:
         for config in explore_list:
             config.update({"experiment_path": experiment})
@@ -76,6 +83,15 @@ def start_experiment(slurm, experiment, gpus):
 
 
 @cli.command()
+@click.option("-e", "--experiment", type=str, required=True)
+@click.option("-o", "--output", type=str, required=True)
+def get_script(experiment, output):
+    from src.kubernetes import create_bash_script
+
+    create_bash_script(experiment=experiment, destination=output)
+
+
+@cli.command()
 @click.option(
     "-c",
     "--config",
@@ -88,6 +104,20 @@ def run_exp(config: str):
 
     config = json.loads(config)
     benchmark_dataset(config)
+    print("=== Task ended successfuly ===")
+
+
+@cli.command()
+@click.option("-e", "--experiment", type=str, required=True)
+def run_exp_kube(experiment: str):
+    from src.orchestrator import load_experiment
+
+    job_index = int(os.environ.get("JOB_COMPLETION_INDEX", 0))
+    explore_list = load_experiment(experiment)
+
+    from src.benchmark_logic import benchmark_dataset
+
+    benchmark_dataset(explore_list[job_index])
     print("=== Task ended successfuly ===")
 
 

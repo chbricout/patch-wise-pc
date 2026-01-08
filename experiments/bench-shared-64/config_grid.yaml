@@ -12,19 +12,18 @@ num_units:
   - 512
 lr:
   - 0.05
-  - 0.01
 dataset:
   - celeba
   - imagenet
-  - cifar
 kernel_size:
-  - [2,2]
-  - [4,4]
-  - [8,8]
+  - [2, 2]
+  - [4, 4]
+  - [8, 8]
+  - [16, 16]
 colour_transform:
   - ycc_lossless
   - None
 batch_size:
   - 32
 early_stopping_delta:
-  - 10
+  - 30

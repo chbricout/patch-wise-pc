@@ -97,7 +97,8 @@ def get_config_key(
         if key == "experiment_path":
             continue
         if key == "patch_ckpt":
-            item = item.split("/")[-1].removesuffix(".ckpt")
+            item = item.removesuffix("/version_0/checkpoints/")
+            item = item.split("/")[-1].replace(".ckpt", "")
         name += f"+{item}"
 
     if kernel_size is not None:
@@ -106,11 +107,16 @@ def get_config_key(
     return name
 
 
-def load_experiment(exp_dir):
+def load_experiment_config(exp_dir):
     config_grid = os.path.join(exp_dir, "config_grid.yaml")
     with open(config_grid, "r") as yaml_conf:
         explore_grid = yaml.safe_load(yaml_conf)
     explore_grid.update({"experiment_path": [exp_dir]})
+    return explore_grid
+
+
+def load_experiment(exp_dir):
+    explore_grid = load_experiment_config(exp_dir)
     keys, values = zip(*explore_grid.items())
     explore_list = [dict(zip(keys, v)) for v in itertools.product(*values)]
 

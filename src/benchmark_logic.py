@@ -3,6 +3,7 @@ import random
 import gc
 from datetime import datetime
 from typing import Any
+import glob
 
 import dotenv
 import lightning as L
@@ -43,6 +44,7 @@ class BenchPCImage(L.LightningModule):
 
         if config["circuit_type"] == "composite":
             assert "patch_ckpt" in config, "Missing path to patch checkpoint"
+
             patch_module = BenchPCImage.load_from_checkpoint(
                 config["patch_ckpt"], map_location="cpu", load_composite=True
             )
@@ -256,10 +258,15 @@ def benchmark(config, datamodule, turn_off_logs=False):
 def benchmark_dataset(config):
     if config["circuit_type"] == "composite":
         # print(f"Loading cpatch checkpoint {config['patch_ckpt']}", flush=True)
+        if ".ckpt" not in config["patch_ckpt"]:
+            config["patch_ckpt"] = glob.glob(f"{config['patch_ckpt']}/*.ckpt")[0]
         patch_config = torch.load(config["patch_ckpt"], map_location="cpu")[
             "hyper_parameters"
         ]["config"]
         config["dataset"] = patch_config["dataset"]
+        config["num_units"] = patch_config["num_units"]
+        config["layer_type"] = patch_config["layer_type"]
+        config["region_graph"] = patch_config["region_graph"]
         config["early_stopping_delta"] = patch_config.get("early_stopping_delta", 0)
         config["colour_transform"] = patch_config.get("colour_transform", None)
     # print(f"Loading dataset {config['dataset']}", flush=True)

@@ -1,0 +1,14 @@
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: s2893001-patch-wise-output
+  namespace: eidf029ns
+  labels:
+    eidf/user: s2893001-infk8s
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: csi-cephfs-sc
