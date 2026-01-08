@@ -1,0 +1,27 @@
+circuit_type:
+  - shared
+layer_type:
+  - cp-t
+  - cp
+region_graph:
+  - quad-graph
+  - quad-tree-2
+num_units:
+  - 256
+  - 512
+lr:
+  - 0.05
+dataset:
+  - imagenet
+kernel_size:
+  - [2, 2]
+  - [4, 4]
+  - [8, 8]
+  - [16, 16]
+colour_transform:
+  - ycc_lossless
+  - None
+batch_size:
+  - 32
+early_stopping_delta:
+  - 30

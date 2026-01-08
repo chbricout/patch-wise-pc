@@ -21,8 +21,8 @@ spec:
             - >
               cd /code/patch-wise-pc;
               mkdir experiments/$EXP;
-              ls -l -a -h datasets;
-              python3 cli.py  run-exp-kube
+              ls -l -a -h;
+              python3 cli.py  run-exp-kube -e fixed_experiments/$EXP
           resources:
             requests:
               cpu: 4
@@ -47,7 +47,7 @@ spec:
             - >
               cd /code;
               git clone https://github.com/chbricout/patch-wise-pc.git;
-              mv experiments fixed_experiments;
+              mv /code/patch-wise-pc/experiments /code/patch-wise-pc/fixed_experiments;
               chown -R 1001:1001 /code/patch-wise-pc
           resources:
             requests:
