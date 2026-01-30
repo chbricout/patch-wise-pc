@@ -61,9 +61,8 @@ class TorchCircuitEMOptimizer(Optimizer):
         self.pc = pc
         self._log_likelihoods = {}
         self._accumulator_categorical = {}
-        self._accumulator_sum = {}
         self.grad_acc = grad_acc
-        self.current_acc_step = {}
+        self._current_acc_step = 0
 
     def log_likelihood(self, batch):
         return self.pc.evaluate(batch, module_fn=self.em_forward)
@@ -92,23 +91,10 @@ class TorchCircuitEMOptimizer(Optimizer):
             return
 
         if isinstance(layer, TorchSumLayer) or isinstance(layer, TorchCPTLayer):
-            weight = list(layer.parameters())[0]
-            old_weight = weight.detach().clone()
-            weight_grad = weight.grad
-            if self.grad_acc:
-                if layer in self._accumulator_sum:
-                    weight_grad += self._accumulator_sum[layer].detach().clone()
-                self._accumulator_sum[layer] = weight_grad
-                self.current_acc_step[layer] = self.current_acc_step.get(layer, 0) + 1
-
-                if self.grad_acc == self.current_acc_step[layer]:
-                    weight.mul_(weight_grad / self.grad_acc).clamp_(min=alpha)
-                    weight.div_(weight.sum(dim=-1, keepdim=True))
-                    weight.data = old_weight.lerp(weight, weight=lr)
-                    self.current_acc_step[layer] = 0
-                    self._accumulator_sum.pop(layer)
-            else:
-                weight.mul_(weight_grad).clamp_(min=alpha)
+            if self.grad_acc == 0 or self.grad_acc == self._current_acc_step:
+                weight = list(layer.parameters())[0]
+                old_weight = weight.detach().clone()
+                weight.mul_(weight.grad).clamp_(min=alpha)
                 weight.div_(weight.sum(dim=-1, keepdim=True))
                 weight.data = old_weight.lerp(weight, weight=lr)
 
@@ -130,12 +116,9 @@ class TorchCircuitEMOptimizer(Optimizer):
                     numerator = numerator.detach() + num
                     denominator = denominator.detach() + den
                 self._accumulator_categorical[layer] = (numerator, denominator)
-                self.current_acc_step[layer] = self.current_acc_step.get(layer, 0) + 1
-                if self.grad_acc == self.current_acc_step[layer]:
+                if self.grad_acc == self._current_acc_step:
                     exp_params = numerator / denominator.clamp(min=alpha).unsqueeze(-1)
                     probs.data.lerp_(exp_params, weight=lr)
-                    self.current_acc_step[layer] = 0
-                    self.current_acc_step.pop(layer)
 
             else:
                 exp_params = numerator / denominator.clamp(min=alpha).unsqueeze(-1)
@@ -176,13 +159,15 @@ class TorchCircuitEMOptimizer(Optimizer):
         # closure().backward()
 
         closure()
+        self._current_acc_step += 1
         # lightning closure automatically call backward on the loss
         for module in self.pc.topological_ordering():
             self.em_backward(module)
 
         self._log_likelihoods.clear()
-        self.pc.zero_grad()
-
+        if self.grad_acc == 0 or self._current_acc_step == self.grad_acc:
+            self.pc.zero_grad()
+            self._current_acc_step = 0
         # return output_log_probs
 
     def zero_grad(self, set_to_none=True):

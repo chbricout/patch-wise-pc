@@ -200,6 +200,32 @@ def cifar():
     tune_grid("CIFAR_patch_search", cifar_config_define)
 
 
+@tune.command()
+@click.option(
+    "-S",
+    "--slurm",
+    type=bool,
+    is_flag=True,
+)
+def em_im32(slurm):
+    if slurm:
+        from src.slurm import get_gpu_job_slurm
+
+        job = get_gpu_job_slurm("EM_Imagenet32_Search", num_gpu=10)
+        job.add_cmd("srun python cli.py tune em_im32")
+        job.sbatch()
+    else:
+        os.environ["TUNE_DISABLE_STRICT_METRIC_CHECKING"] = "1"
+        import ray
+        import torch
+        from src.tune import tune_grid
+        from src.tune_grid import em_imagenet32_config_define
+
+        ray.init(num_gpus=torch.cuda.device_count())
+
+        tune_grid("EM_Imagenet32_Search", em_imagenet32_config_define)
+
+
 if __name__ == "__main__":
     rich_logger()
     cli()
