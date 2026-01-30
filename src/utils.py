@@ -1,26 +1,179 @@
 import os
+import random
 import shutil
 import socket
 import sys
 import uuid
 from datetime import datetime
 from typing import Optional, Union
-
+import functools
+from src.monarch_hclt import construct_hclt_vtree
 import torch
 import yaml
 from cirkit.templates import data_modalities, utils
+from cirkit.templates.region_graph import ChowLiuTree
+from cirkit.symbolic.parameters import mixing_weight_factory
 from lightning import Callback
 from pytorch_lightning.loggers import CometLogger, CSVLogger
 from ray import tune
 from torch.utils.flop_counter import FlopCounterMode
 from torchvision.utils import save_image
-
+import numpy as np
 from src.orchestrator import get_config_key
+
+from collections.abc import Callable
+from os import PathLike
+from pathlib import Path
+
+import graphviz
+
+from cirkit.templates.region_graph.graph import PartitionNode, RegionGraph, RegionNode
+from cirkit.templates.region_graph.algorithms.utils import tree2rg
+
+
+def plot_region_graph(
+    region_graph: RegionGraph,
+    out_path: str | PathLike[str] | None = None,
+    orientation: str = "vertical",
+    region_node_shape: str = "box",
+    partition_node_shape: str = "point",
+    label_font: str = "times italic bold",
+    label_size: str = "21pt",
+    label_color: str = "white",
+    region_label: str | Callable[[RegionNode], str] | None = None,
+    region_color: str | Callable[[RegionNode], str] = "#607d8b",
+    partition_label: str | Callable[[PartitionNode], str] | None = None,
+    partition_color: str | Callable[[PartitionNode], str] = "#ffbd2a",
+) -> graphviz.Digraph:
+    """Plot the region graph using graphviz.
+
+    Args:
+        region_graph: The region graph to plot.
+        out_path: The output path where the plot is saved.
+            If it is None, the plot is not saved to a file. Defaults to None.
+            The Output file format is deduced from the path. Possible formats are:
+            {'jp2', 'plain-ext', 'sgi', 'x11', 'pic', 'jpeg', 'imap', 'psd', 'pct',
+             'json', 'jpe', 'tif', 'tga', 'gif', 'tk', 'xlib', 'vmlz', 'json0', 'vrml',
+             'gd', 'xdot', 'plain', 'cmap', 'canon', 'cgimage', 'fig', 'svg', 'dot_json',
+             'bmp', 'png', 'cmapx', 'pdf', 'webp', 'ico', 'xdot_json', 'gtk', 'svgz',
+             'xdot1.4', 'cmapx_np', 'dot', 'tiff', 'ps2', 'gd2', 'gv', 'ps', 'jpg',
+             'imap_np', 'wbmp', 'vml', 'eps', 'xdot1.2', 'pov', 'pict', 'ismap', 'exr'}.
+             See https://graphviz.org/docs/outputs/ for more.
+        orientation: Orientation of the graph. "vertical" puts the root
+            node at the top, "horizontal" at left. Defaults to "vertical".
+        label_font: Font used to render labels. Defaults to "times italic bold".
+            See https://graphviz.org/faq/font/ for the available fonts.
+        label_size: Size of the font for labels in points. Defaults to "21pt".
+        label_color: Color for the labels in the nodes. Defaults to "white".
+            See https://graphviz.org/docs/attr-types/color/ for supported color.
+        region_label: Either a string or a function.
+            If a function is provided, then it must take as input a region node and returns a string
+            that will be used as label. If None, it defaults to the string representation of the
+            scope of the region node.
+        region_color: Either a string or a function.
+            If a function is provided, then it must take as input a region node and returns a string
+            that will be used as color for the region node. Defaults to "#607d8b".
+        partition_label: Either a string or a
+            function. If a function is provided, then it must take as input a partition node and
+            returns a string that will be used as label. If None, it defaults to an empty string.
+        partition_color: Either a string or a function.
+            If a function is provided, then it must take as input a partition node and returns a
+            string that will be used as color for the partition node. Defaults to "#ffbd2a".
+
+    Raises:
+        ValueError: The format is not among the supported ones.
+        ValueError: The direction is not among the supported ones.
+
+    Returns:
+        graphviz.Digraph: The graphviz object representing the region graph.
+    """
+    fmt: str
+    if out_path is None:
+        fmt = "svg"
+    else:
+        fmt = Path(out_path).suffix.replace(".", "")
+        if fmt not in graphviz.FORMATS:
+            raise ValueError(f"Supported formats are {graphviz.FORMATS}.")
+
+    if orientation not in ["vertical", "horizontal"]:
+        raise ValueError(
+            "Supported graph directions are only 'vertical' and 'horizontal'."
+        )
+
+    def _default_region_label(rgn: RegionNode) -> str:
+        return str(set(rgn.scope))
+
+    def _default_partition_label(_: PartitionNode) -> str:
+        return ""
+
+    if region_label is None:
+        region_label = _default_region_label
+    if partition_label is None:
+        partition_label = _default_partition_label
+
+    dot: graphviz.Digraph = graphviz.Digraph(
+        format=fmt,
+        node_attr={
+            "style": "filled",
+            "fontcolor": label_color,
+            "fontsize": label_size,
+            "fontname": label_font,
+        },
+        engine="dot",
+    )
+    dot.graph_attr["rankdir"] = "BT" if orientation == "vertical" else "LR"
+
+    for node in region_graph.nodes:
+        match node:
+            case RegionNode():
+                dot.node(
+                    str(id(node)),
+                    region_label
+                    if isinstance(region_label, str)
+                    else region_label(node),
+                    color=region_color
+                    if isinstance(region_color, str)
+                    else region_color(node),
+                    shape=region_node_shape,
+                )
+            case PartitionNode():
+                dot.node(
+                    str(id(node)),
+                    partition_label
+                    if isinstance(partition_label, str)
+                    else partition_label(node),
+                    color=(
+                        partition_color
+                        if isinstance(partition_color, str)
+                        else partition_color(node)
+                    ),
+                    shape=partition_node_shape,
+                    width="0.2",
+                )
+        for node_in in region_graph.node_inputs(node):
+            dot.edge(str(id(node_in)), str(id(node)))
+    if out_path is not None:
+        out_dir: Path = Path(out_path).with_suffix("")
+
+        if fmt == "dot":
+            with open(out_dir, "w", encoding="utf8") as f:
+                f.write(dot.source)
+        else:
+            dot.format = fmt
+            dot.render(out_dir, cleanup=True)
+
+    return dot
 
 
 def patch_circuit_factory(
     kernel_size, channel, region_graph, layer_type, num_units, num_classes=1, **kwargs
 ):
+    if region_graph == "chow-liu-tree":
+        if kwargs.get("clt_tree", None) is None:
+            raise ValueError('Missing key "clt_tree" to create the CLT graph')
+        return chow_liu_tree_factory(
+            kwargs.pop("clt_tree"), layer_type, num_units, num_classes, **kwargs
+        )
     return data_modalities.image_data(
         (channel, *kernel_size),
         region_graph=region_graph,
@@ -29,15 +182,75 @@ def patch_circuit_factory(
         sum_product_layer=layer_type,
         num_sum_units=num_units,
         num_classes=num_classes,
-        sum_weight_param=get_parameterization(**kwargs),
+        **get_parameterization(**kwargs),
     )
+
+
+def chow_liu_tree_factory(tree, layer_type, num_units, num_classes=1, **kwargs):
+    # if kwargs.get("data", None) is None:
+    #     raise ValueError('Missing key "data" to create the CLT graph')
+    # data = kwargs["data"].reshape((-1, kernel_size[0] * kernel_size[1] * channel))
+    # print("Building HCLT Tree structure")
+    # tree, _ = construct_hclt_vtree(data, num_bins=64, sigma=0.02, chunk_size=32)
+    print("Converting the tree to a Region Graph")
+    rg = tree2rg(tree)
+    # rg = ChowLiuTree(
+    #     data,
+    #     input_type="categorical",
+    #     as_region_graph=True,
+    #     num_categories=256,
+    #     num_bins=8,
+    #     chunk_size=10_000,
+    # )
+
+    # plot_region_graph(rg, "clt-rg.png")
+    use_em = kwargs.get("optimizer", None) == "EM"
+
+    sum_weight_factory = utils.parameterization_to_factory(get_sum_param(use_em))
+    nary_sum_weight_factory = functools.partial(
+        mixing_weight_factory, param_factory=sum_weight_factory
+    )
+    print("Building the final circuit")
+    return rg.build_circuit(
+        input_factory=utils.name_to_input_layer_factory(
+            "categorical",
+            probs_factory=utils.parameterization_to_factory(get_input_param(use_em)),
+            num_categories=256,
+        ),
+        sum_product=layer_type,
+        sum_weight_factory=sum_weight_factory,
+        nary_sum_weight_factory=nary_sum_weight_factory,
+        num_input_units=num_units,
+        num_sum_units=num_units,
+        num_classes=num_classes,
+        factorize_multivariate=True,
+    )
+
+
+def get_input_param(use_em: bool):
+    if use_em:
+        return utils.Parameterization(initialization="uniform", activation="none")
+    else:
+        return utils.Parameterization(initialization="normal", activation="softmax")
+
+
+def get_sum_param(use_em: bool):
+    if use_em:
+        return utils.Parameterization(initialization="uniform", activation="none")
+    else:
+        return utils.Parameterization(initialization="normal", activation="softmax")
 
 
 def get_parameterization(use_pic: bool = False, **kwargs):
     if use_pic:
-        return utils.Parameterization(initialization="normal")
+        return {"sum_weight_param": utils.Parameterization(initialization="normal")}
+    elif kwargs.get("optimizer", None) == "EM":
+        return {
+            "sum_weight_param": get_sum_param((True)),
+            "input_params": {"probs": get_input_param(True)},
+        }
     else:
-        return utils.Parameterization(activation="softmax", initialization="normal")
+        return {"sum_weight_param": get_sum_param(False)}
 
 
 def circuit_factory(circuit_type: str, *, image_size=None, kernel_size=None, **kwargs):
@@ -48,11 +261,24 @@ def circuit_factory(circuit_type: str, *, image_size=None, kernel_size=None, **k
         return name, patch_circuit_factory(image_size, **kwargs)
 
 
+def dataloader_to_tensor(loader, device=None, num_samples=-1):
+    batches = []
+    for batch in loader:
+        # handle (features, labels) or single-tensor batches
+        x = batch[0] if isinstance(batch, (list, tuple)) else batch
+        if device is not None:
+            x = x.to(device)
+        batches.append(x)
+        if len(batches) * x.shape[0] > num_samples and num_samples != -1:
+            break
+    return torch.cat(batches, dim=0)
+
+
 def patchify(kernel_size, stride, compile=True, contiguous_output=False):
     kh, kw = (kernel_size, kernel_size) if isinstance(kernel_size, int) else kernel_size
     sh, sw = (stride, stride) if isinstance(stride, int) else stride
 
-    def _patchify(image: torch.Tensor):
+    def _patchify(image: torch.Tensor, one_patch=False):
         # Accept (C,H,W) or (B,C,H,W)
 
         # Ensure contiguous NCHW for predictable strides
@@ -70,7 +296,11 @@ def patchify(kernel_size, stride, compile=True, contiguous_output=False):
             stride=(sN, sC, sH * sh, sW * sw, sH, sW),
         )
         # Reorder to (B, P, C, kh, kw) where P = Lh*Lw
-        patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B * Lh * Lw, C, kh, kw)
+        patches = patches.permute(0, 2, 3, 1, 4, 5).reshape(B, Lh * Lw, C, kh, kw)
+        if one_patch:
+            n_patch = patches.shape[1]
+            patches = patches[torch.arange(B), torch.randint(0, n_patch, (B,))]
+        patches = patches.reshape(-1, C, kh, kw)
 
         if contiguous_output:
             patches = (
@@ -220,6 +450,7 @@ class LocalLogger(CSVLogger):
             prefix=prefix,
             flush_logs_every_n_steps=flush_logs_every_n_steps,
         )
+        self.can_log_status = False
         self.summary_path = os.path.join(self.log_dir, "summary.yaml")
         self.start_time = datetime.now()
         self.should_compress = compress
@@ -248,24 +479,31 @@ class LocalLogger(CSVLogger):
             file_path = os.path.join(self.sample_dir, f"sample_{idx}.png")
             save_image(img, file_path)
 
+    def log_kld(self, kld: np.ndarray):
+        np.savetxt(os.path.join(self.log_dir, "kld_sum_weight.csv"), kld, delimiter=",")
+
     def _compress(self):
         output = os.path.join(self.log_dir, self.name)
         shutil.make_archive(output, "zip", self.log_dir)
 
     def finalize(self, status: str):
         """Called by Lightning on success or interruption."""
-        self.summary["end_datetime"] = datetime.now().isoformat()
 
-        if status == "success":
-            self.summary["status"] = "SUCCESS"
-        else:
-            # lightning reports ANY interruption as "failed"
-            self.summary["status"] = "FAILED"
+        # Only write the status if we have trained the model
+        # This avoid writing the status when running the init time validation loop
+        if self.can_log_status:
+            self.summary["end_datetime"] = datetime.now().isoformat()
 
-        write_summary_yaml(self.summary_path, self.summary)
+            if status == "success":
+                self.summary["status"] = "SUCCESS"
+            else:
+                # lightning reports ANY interruption as "failed"
+                self.summary["status"] = "FAILED"
 
-        if self.should_compress:
-            self._compress()
+            write_summary_yaml(self.summary_path, self.summary)
+
+            if self.should_compress:
+                self._compress()
 
         super().finalize(status)
 

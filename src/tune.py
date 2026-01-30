@@ -1,6 +1,7 @@
 import os
 import random
 
+from config import DATASET_ROOT
 import lightning as L
 import numpy as np
 import torch
@@ -10,7 +11,7 @@ from ray.tune.integration.pytorch_lightning import TuneReportCheckpointCallback
 from ray.tune.schedulers import ASHAScheduler
 from ray.tune.search.optuna import OptunaSearch
 
-from src.benchmark_logic import BenchPCImage, load_cifar, load_mnist
+from src.benchmark_logic import BenchPCImage, load_cifar, load_imagenet32, load_mnist
 from src.utils import GreenCallbackRay
 
 
@@ -53,12 +54,12 @@ def tune_grid(name: str, config_fn, num_samples=100):
     df.to_csv(f"./hp_search/{name}/results_summary.csv", index=False)
 
 
-def tune_pl(config, train_dataloader, val_dataloader, test_dataloader):
+def tune_pl(config, datamodule):
     random.seed(42)
     np.random.seed(42)
     torch.manual_seed(42)
 
-    light_mode = BenchPCImage(config, len(test_dataloader.dataset))
+    light_mode = BenchPCImage(config)
     green_callback = GreenCallbackRay()
     tunereport_callback = TuneReportCheckpointCallback(
         metrics=["val_loss", "val_bpd", "number_parameters"],
@@ -79,20 +80,19 @@ def tune_pl(config, train_dataloader, val_dataloader, test_dataloader):
         enable_model_summary=False,
     )
 
-    trainer.fit(
-        light_mode,
-        train_dataloaders=train_dataloader,
-        val_dataloaders=val_dataloader,
-    )
+    trainer.fit(light_mode, datamodule=datamodule)
 
 
 def tune_dataset(config):
+    print("Current dataset directory:", DATASET_ROOT)
     if config["dataset"] == "mnist":
-        dataloaders = load_mnist(config)
+        datamodule = load_mnist(config)
     elif config["dataset"] == "cifar":
-        dataloaders = load_cifar(config)
+        datamodule = load_cifar(config)
+    elif config["dataset"] == "imagenet32":
+        datamodule = load_imagenet32(config)
     else:
-        print(f"Error: no dataset named {config['dataset']}")
+        print(f"Error: no dataset named {config['dataset']} at {os.getcwd()}")
         return
 
-    return tune_pl(config, **dataloaders)
+    return tune_pl(config, datamodule)

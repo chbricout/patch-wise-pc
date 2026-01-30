@@ -60,3 +60,34 @@ def cifar_config_define(trial: Trial):
         "lr": lr,
         "kernel_size": [kernel_size, kernel_size],
     }
+
+
+def em_imagenet32_config_define(trial: Trial):
+    layer_type = trial.suggest_categorical("layer_type", ["cp-t", "cp"])
+    region_graph = trial.suggest_categorical(
+        "region_graph", ["quad-graph", "quad-tree-2"]
+    )
+
+    kernel_size = trial.suggest_categorical("kernel_size", [2, 4, 8, 16, 32])
+    if kernel_size < 32:
+        num_units = trial.suggest_int("num_units", 10, 1024, log=True)
+    else:
+        num_units = trial.suggest_int("num_units", 10, 512, log=True)
+
+    lr = trial.suggest_loguniform("lr", 1e-4, 1)
+
+    grad_accumulation = trial.suggest_loguniform("accumulate_grad_em", 1, 100)
+    return {
+        "circuit_type": "patch",
+        "dataset": "imagenet32",
+        "batch-size": 128,
+        "layer_type": layer_type,
+        "region_graph": region_graph,
+        "num_units": num_units,
+        "lr": lr,
+        "kernel_size": [kernel_size, kernel_size],
+        "accumulate_grad_em": grad_accumulation,
+        "optimizer": "EM",
+        "early_stopping_delta": 10,
+        "colour_transform": "ycc_lossless",
+    }

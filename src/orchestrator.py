@@ -94,12 +94,16 @@ def get_config_key(
 ):
     name = f"{circuit_type}"
     for key, item in kwargs.items():
-        if key == "experiment_path":
+        if key == "experiment_path" or key == "data" or key == "clt_tree":
             continue
         if key == "patch_ckpt":
             item = item.removesuffix("/version_0/checkpoints/")
-            item = item.split("/")[-1].replace(".ckpt", "")
-        name += f"+{item}"
+            item = item.split("/")[-4].replace(".ckpt", "")
+        if key == "scheduler":
+            for k, i in item.items():
+                name += f"+{k}"
+        else:
+            name += f"+{item}"
 
     if kernel_size is not None:
         item = "x".join(str(i) for i in kernel_size)

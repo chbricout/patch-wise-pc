@@ -13,7 +13,7 @@ from cirkit.backend.torch.parameters.pic import pc2qpc
 from cirkit.backend.torch.queries import SamplingQuery
 from cirkit.pipeline import PipelineContext
 from cirkit.pipeline import compile as cirkit_compile
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from torch import optim
 
@@ -28,20 +28,51 @@ from src.utils import (
     patchify,
     unpatchify,
     write_summary_yaml,
+    dataloader_to_tensor,
 )
 from src.share_param import get_composite_circ, get_share_circ
+from src.em_optimizer import (
+    TorchCircuitEMOptimizer,
+    normalize_weight,
+    reinit_weight_pyjuice,
+)
+from src.monarch_hclt import construct_hclt_vtree
+from scipy.stats import entropy
 
 dotenv.load_dotenv()
 
 
 # define the LightningModule
 class BenchPCImage(L.LightningModule):
-    def __init__(self, config: dict[str, Any], load_composite=False):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        load_composite=False,
+        data_clt: torch.Tensor = None,
+        clt_tree: np.ndarray | None = None,
+    ):
         super().__init__()
-        # print("initializing benchmark PC", flush=True)
-        self.key, self.symbolic_circuit = circuit_factory(**config)
-        self.use_pic = config.get("use_pic", False)
 
+        if config["region_graph"] == "chow-liu-tree":
+            if clt_tree is None:
+                patch_fn = patchify(
+                    config["kernel_size"], config["kernel_size"], compile=False
+                )
+                data = patch_fn(data_clt).reshape(
+                    (
+                        -1,
+                        config["kernel_size"][0]
+                        * config["kernel_size"][1]
+                        * config["channel"],
+                    )
+                )
+                clt_tree, _ = construct_hclt_vtree(
+                    data, num_bins=64, sigma=0.02, chunk_size=32
+                )
+
+        # print("initializing benchmark PC", flush=True)
+        self.key, self.symbolic_circuit = circuit_factory(**config, clt_tree=clt_tree)
+        self.use_pic = config.get("use_pic", False)
         if config["circuit_type"] == "composite":
             assert "patch_ckpt" in config, "Missing path to patch checkpoint"
 
@@ -49,7 +80,7 @@ class BenchPCImage(L.LightningModule):
                 config["patch_ckpt"], map_location="cpu", load_composite=True
             )
             # print("getting composite circuit", flush=True)
-
+            self.patch_height = len(list(patch_module.circuit.topological_ordering()))
             self.circuit = get_composite_circ(config, patch_module)
             # print("composite circuit built", flush=True)
 
@@ -69,7 +100,14 @@ class BenchPCImage(L.LightningModule):
         else:
             self.circuit = cirkit_compile(self.symbolic_circuit)
             self.kernel_size = config["kernel_size"]
+
+        if config.get("optimizer", None) == "EM":
+            if config.get("init", None) == "pyjuice":
+                reinit_weight_pyjuice(self.circuit)
+            else:
+                normalize_weight(self.circuit)
         # print("benchmark PC initialized", flush=True)
+        self.patch_fn = patchify(self.kernel_size, self.kernel_size, compile=False)
 
         self.config = config
         self.circuit_type = self.config["circuit_type"]
@@ -79,25 +117,66 @@ class BenchPCImage(L.LightningModule):
         self.lr = self.config["lr"]
         self.image_size = self.config["image_size"]
         self.channel = self.config["channel"]
+        self.one_patch = self.config.get("one_patch", False)
         if load_composite:
             # print(f"Finished loading patch level", flush=True)
             return
-        self.patch_fn = patchify(self.kernel_size, self.kernel_size, compile=False)
+
         self.patch_per_img = (self.image_size[0] // self.kernel_size[0]) * (
             self.image_size[1] // self.kernel_size[1]
         )
-        self.save_hyperparameters()
+
+        if self.config.get("optimizer", None) == "EM":
+            self.em_optimizer = TorchCircuitEMOptimizer(
+                self.circuit,
+                params=self.circuit.parameters(),
+                lr=self.lr,
+                grad_acc=config.get("accumulate_grad_em", 0),
+            )
+            # self.automatic_optimization = False
+
+        if isinstance(clt_tree, np.ndarray):
+            clt_tree = clt_tree.tolist()
+        self.save_hyperparameters(ignore=["data_clt"])
+
+    def on_train_start(self):
+        if self.circuit_type == "composite":
+            sum_node = list(self.circuit.topological_ordering())[self.patch_height - 1]
+            print(sum_node)
+            self.sum_weight_at_init = sum_node.weight.internal_forward().detach().cpu()
+
+    def on_train_end(self):
+        if self.circuit_type == "composite":
+            sum_node = list(self.circuit.topological_ordering())[self.patch_height - 1]
+            print(sum_node)
+            sum_weight_after_train = sum_node.weight.internal_forward().detach().cpu()
+            sum_kld = entropy(
+                self.sum_weight_at_init.cpu(), sum_weight_after_train.cpu(), axis=1
+            )
+            self.logger.log_kld(sum_kld)
 
     def training_step(self, batch, batch_idx):
-        batch = self.prepare_batch(batch)
+        batch = self.prepare_batch(batch, training=True)
 
-        log_likelihoods = self.circuit(batch)
-        loss = -torch.mean(log_likelihoods)
+        if self.config.get("optimizer", None) == "EM":
+            # def closure():
+            #     return batch
+            #
+            # self.em_optimizer.zero_grad()
+            log_likelihoods = self.em_optimizer.log_likelihood(batch)
+            # self.manual_backward(log_likelihoods.sum())
+            # self.em_optimizer.step()
+        else:
+            log_likelihoods = self.circuit(batch)
+        loss = -torch.mean(log_likelihoods.clone())
 
         if self.circuit_type == "patch":
             self.log("train_loss", (loss * self.patch_per_img).item())
         else:
             self.log("train_loss", loss.item())
+
+        if self.config.get("optimizer", None) == "EM":
+            return log_likelihoods.sum()
         return loss
 
     def on_validation_epoch_start(self):
@@ -119,11 +198,12 @@ class BenchPCImage(L.LightningModule):
     def on_validation_epoch_end(self):
         val_loss = sum(self.running_loss) / len(self.running_loss)
         self.log("val_loss", val_loss)
+        self
 
     def on_test_epoch_start(self):
         self.test_loss = 0
 
-    def prepare_batch(self, batch):
+    def prepare_batch(self, batch, training=False):
         if (
             isinstance(batch, list)
             or isinstance(batch, tuple)
@@ -133,8 +213,9 @@ class BenchPCImage(L.LightningModule):
 
         # this is the test loop
         if self.circuit_type == "patch":
-            batch = self.patch_fn(batch)
+            batch = self.patch_fn(batch, one_patch=(self.one_patch and training))
         BS = batch.shape[0]
+
         batch = batch.reshape(BS, -1).contiguous()
         return batch
 
@@ -177,8 +258,15 @@ class BenchPCImage(L.LightningModule):
     def configure_optimizers(self):
         if "weight_decay" in self.config:
             optimizer = optim.Adam(
-                self.parameters(), lr=float(self.config["weight_decay"])
+                self.parameters(),
+                lr=self.lr,
+                weight_decay=float(self.config["weight_decay"]),
             )
+        if self.config.get("optimizer", None) == "SGD":
+            optimizer = optim.SGD(self.parameters(), lr=self.lr)
+
+        elif self.config.get("optimizer", None) == "EM":
+            optimizer = self.em_optimizer
         else:
             optimizer = optim.Adam(self.parameters(), lr=self.lr)
 
@@ -191,7 +279,7 @@ class BenchPCImage(L.LightningModule):
                     T_mult=int(config_sc["T_mult"]),
                     eta_min=float(config_sc["eta_min"]),
                 )
-                return {"optimizer": optimizer, "scheduler": scheduler}
+                return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
             else:
                 raise KeyError(f"Scheduler {config_sc['name']} is not defined")
         return optimizer
@@ -202,13 +290,20 @@ def benchmark(config, datamodule, turn_off_logs=False):
     np.random.seed(42)
     torch.manual_seed(42)
     early_stopping_delta = config.get("early_stopping_delta", 0)
-    light_mode = BenchPCImage(config)
+
+    data_clt = None
+    if config["region_graph"] == "chow-liu-tree":
+        datamodule.setup("train")
+        data_clt = dataloader_to_tensor(datamodule.train_dataloader(), num_samples=2000)
+
+    light_mode = BenchPCImage(config, data_clt=data_clt)
     checkpoint_callback = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1)
     early_stop = EarlyStopping(
-        monitor="val_loss", mode="min", min_delta=early_stopping_delta
+        monitor="val_loss", mode="min", min_delta=early_stopping_delta, patience=3
     )
     exception_callback = StatusExceptionCallback()
     green_callback = GreenCallback()
+    lr_monitor = LearningRateMonitor(logging_interval="epoch")
     logger = new_csv_logger(light_mode.key, exp_dir=config["experiment_path"])
 
     log_conf = {}
@@ -222,17 +317,27 @@ def benchmark(config, datamodule, turn_off_logs=False):
         check_val_every_n_epoch=1,
         logger=logger,
         max_epochs=300,
-        callbacks=[early_stop, checkpoint_callback, exception_callback, green_callback],
+        callbacks=[
+            lr_monitor,
+            early_stop,
+            checkpoint_callback,
+            exception_callback,
+            green_callback,
+        ],
         num_sanity_val_steps=10,
         log_every_n_steps=400,
         inference_mode=False,
         enable_progress_bar=False,
-        precision="bf16-mixed",
+        # precision="bf16-mixed",
+        accumulate_grad_batches=config.get("accumulate_grad", 1),
+        gradient_clip_val=config.get("gradient_clip", 0),
         **log_conf,
     )
 
     try:
         # print("Start Training", flush=True)
+        trainer.validate(light_mode, datamodule=datamodule)
+        logger.can_log_status = True  # Enable status logging for tracking
         trainer.fit(light_mode, datamodule=datamodule)
         light_mode = load_checkpoint(config, checkpoint_callback.best_model_path)
         test_results = trainer.test(light_mode, datamodule=datamodule)
@@ -279,6 +384,8 @@ def benchmark_dataset(config):
         datamodule = load_celebA(config)
     elif config["dataset"] == "imagenet":
         datamodule = load_imagenet(config)
+    elif config["dataset"] == "imagenet32":
+        datamodule = load_imagenet32(config)
     else:
         print(f"Error: no dataset named {config['dataset']}")
         return
@@ -354,6 +461,21 @@ def load_imagenet(config):
     )
 
     return ImageNet(DATASET_ROOT, batch_size, get_transform(config))
+
+
+def load_imagenet32(config):
+    if "batch_size" in config:
+        batch_size = config["batch_size"]
+    else:
+        batch_size = 64
+    config.update(
+        {
+            "image_size": (32, 32),
+            "channel": 3,
+        }
+    )
+
+    return ImageNet(DATASET_ROOT, batch_size, get_transform(config), resolution=32)
 
 
 def load_checkpoint(config, ckpt_path):

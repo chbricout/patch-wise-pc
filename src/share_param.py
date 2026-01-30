@@ -72,14 +72,18 @@ def get_composite_circ(top_circuit_config: dict[str, Any], patch_circuit_module)
         patch_circuit_module.circuit,
         should_init_mean=top_circuit_config.get("should_init_mean", False),
         should_freeze=top_circuit_config.get("should_freeze", False),
+        sum_noise_magnitude=top_circuit_config.get("sum_noise_magnitude", 0),
     )
     # print(f"Memory Status after share {psutil.virtual_memory()}", flush=True)
 
-    assert test_parameter_sharing(
-        composite_compiled,
-        patch_circuit_module.circuit,
-        (patch_circuit_config["channel"], *patch_circuit_config["image_size"]),
-        patch_circuit_config["kernel_size"],
+    assert (
+        test_parameter_sharing(
+            composite_compiled,
+            patch_circuit_module.circuit,
+            (patch_circuit_config["channel"], *patch_circuit_config["image_size"]),
+            patch_circuit_config["kernel_size"],
+        )
+        or top_circuit_config.get("sum_noise_magnitude", None) is not None
     ), "Parameter sharing failed, likelihood is not equal"
     print(f"Memory Status after test {psutil.virtual_memory()}", flush=True)
 
@@ -165,15 +169,19 @@ class TorchSharedParameter(TorchParameterInput):
         self.in_shape = in_shape
         self.internal_param = parameter
 
-    def forward(self):
+    def internal_forward(self):
         current_input = None
         for param in self.internal_param:
             if current_input is None:
                 current_input = param()
             else:
                 current_input = param(current_input)
-        share_fold, *inner_units = current_input.shape
-        expanded = current_input.expand(
+        return current_input
+
+    def forward(self):
+        param = self.internal_forward()
+        share_fold, *inner_units = param.shape
+        expanded = param.expand(
             self.num_folds // share_fold, share_fold, *inner_units
         ).reshape(self.num_folds, *inner_units)
 
@@ -189,6 +197,7 @@ def share_param_like(
     share_struct: TorchCircuit,
     should_init_mean=False,
     should_freeze=False,
+    sum_noise_magnitude=0,
 ):
     for idx, layer in enumerate(share_struct.layers):
         if isinstance(layer, TorchInputLayer):
@@ -203,6 +212,7 @@ def share_param_like(
             internal_param = layer.weight.nodes
             has_new_nodes = False
             if layer.num_output_units != base_circ.layers[idx].num_output_units:
+                # TODO insert noise when copying the weight
                 new_parameter = copy_parameter(
                     layer.weight, base_circ.layers[idx].weight.nodes[0].shape
                 )
@@ -215,6 +225,35 @@ def share_param_like(
                     ._ptensor.data.clone()
                     .repeat((1, num_output, num_input))
                 )
+                if sum_noise_magnitude != 0:
+                    # Inject noise in the sum node
+                    old_weight = new_parameter.nodes[0]._ptensor.clone()
+                    old_weight_softmaxed = new_parameter().detach().cpu()
+                    print(
+                        "Weight magnitude:",
+                        old_weight.min(),
+                        old_weight.max(),
+                    )
+                    # Rescale the uniform noise to be between -1 and 1 and then scale it with the choosen noise magnitude
+                    new_parameter.nodes[0]._ptensor.data += (
+                        (torch.rand_like(new_parameter.nodes[0]._ptensor) * 2) - 1
+                    ) * sum_noise_magnitude
+                    new_weights = new_parameter.nodes[0]._ptensor.clone()
+                    new_weights_softmaxed = new_parameter().detach().cpu()
+                    print(
+                        "Weight magnitude after noise:",
+                        new_weights.min(),
+                        new_weights.max(),
+                        new_weights_softmaxed.shape,
+                    )
+                    from scipy.stats import entropy
+
+                    print(
+                        "KL Divergence (scipy entropy)",
+                        entropy(old_weight_softmaxed, new_weights_softmaxed, axis=1),
+                        (old_weight_softmaxed - new_weights_softmaxed).abs().sum(),
+                    )
+
                 has_new_nodes = True
 
                 internal_param = new_parameter.nodes

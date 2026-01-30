@@ -1,7 +1,7 @@
 from simple_slurm import Slurm
 
 
-def get_gpu_job_slurm(name) -> Slurm:
+def get_gpu_job_slurm(name, num_gpu=1) -> Slurm:
     exclude_flag = ""
     for i in range(7, 13):
         exclude_flag += f"damnii{str(i).zfill(2)},"
@@ -12,7 +12,7 @@ def get_gpu_job_slurm(name) -> Slurm:
         cpus_per_task=4,
         mem="128G",
         partition="PGR-Standard",
-        gres="gpu:1",
+        gres=f"gpu:{num_gpu}",
         time="24:00:00",
         output=f"./logs/{name}.out",
         exclude=exclude_flag,
